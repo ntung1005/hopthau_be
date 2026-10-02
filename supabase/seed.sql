@@ -2,7 +2,7 @@
 
 insert into projects (id, slug, name, developer, province, address, handover_date, is_social_housing) values
   ('10000000-0000-0000-0000-000000000001', 'noxh-demo-song-hong', 'NOXH Demo Sông Hồng', 'Chủ đầu tư Demo A', 'Hà Nội', 'Long Biên, Hà Nội', '2026-12-15', true),
-  ('10000000-0000-0000-0000-000000000002', 'noxh-demo-binh-an', 'NOXH Demo Bình An', 'Chủ đầu tư Demo B', 'TP.HCM', 'Thủ Đức, TP.HCM', '2027-03-01', true);
+  ('10000000-0000-0000-0000-000000000002', 'noxh-demo-binh-an', 'NOXH Demo Bình An', 'Chủ đầu tư Demo B', 'TP. Hồ Chí Minh', 'Thủ Đức, TP. Hồ Chí Minh', '2027-03-01', true);
 
 insert into unit_types (id, project_id, name, area_m2, bedrooms, bathrooms) values
   ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'Mẫu A · 2PN', 56.2, 2, 1),

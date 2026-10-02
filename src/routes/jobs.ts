@@ -13,7 +13,7 @@ const JOB = 'id,request_id,owner_id,contractor_id,price,duration_days,warranty_m
 interface Job {
   id: string;
   owner_id: string | null;
-  price: number;
+  price: number | null;
   status: string;
   warranty_months: number;
   completed_at: string | null;
@@ -21,20 +21,26 @@ interface Job {
   [k: string]: unknown;
 }
 
-interface Milestone { amount: number; status: string; paid_at: string | null }
+interface Milestone { amount: number | null; status: string; paid_at: string | null }
 interface Change { amount: number; days_delta: number; status: string }
 
-/** Tổng tiền hiện tại, đã duyệt, đã trả; hạn bảo hành. Tính ở một chỗ để app và web không tự cộng. */
-export function jobSummary(job: { price: number; duration_days: number; warranty_months: number; completed_at: string | null },
+/**
+ * Tổng tiền hiện tại, đã duyệt, đã trả; hạn bảo hành. Tính ở một chỗ để app và web không tự cộng.
+ * Làm việc trực tiếp (price null): không có số tiền nào, offline = true.
+ */
+export function jobSummary(job: { price: number | null; duration_days: number | null; warranty_months: number; completed_at: string | null },
                            milestones: Milestone[], changes: Change[]) {
   const approvedChanges = changes.filter((c) => c.status === 'approved');
   const warrantyUntil = job.completed_at ? new Date(job.completed_at) : null;
   warrantyUntil?.setMonth(warrantyUntil.getMonth() + job.warranty_months);
+  const offline = job.price === null;
+  const sum = (ms: Milestone[]) => (offline ? null : ms.reduce((s, m) => s + Number(m.amount), 0));
   return {
-    total: job.price + approvedChanges.reduce((s, c) => s + Number(c.amount), 0),
-    total_days: job.duration_days + approvedChanges.reduce((s, c) => s + c.days_delta, 0),
-    approved_amount: milestones.filter((m) => m.status === 'approved').reduce((s, m) => s + Number(m.amount), 0),
-    paid_amount: milestones.filter((m) => m.paid_at).reduce((s, m) => s + Number(m.amount), 0),
+    offline,
+    total: offline ? null : job.price! + approvedChanges.reduce((s, c) => s + Number(c.amount), 0),
+    total_days: job.duration_days === null ? null : job.duration_days + approvedChanges.reduce((s, c) => s + c.days_delta, 0),
+    approved_amount: sum(milestones.filter((m) => m.status === 'approved')),
+    paid_amount: sum(milestones.filter((m) => m.paid_at)),
     warranty_until: warrantyUntil?.toISOString() ?? null,
   };
 }

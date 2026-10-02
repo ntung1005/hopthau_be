@@ -4,6 +4,7 @@
 // từ trái sang theo x; e, w tính từ trên xuống theo y) một khoảng offset.
 // Góc phòng có thể bị cắt (cột, hộp kỹ thuật, góc vát): cắt vuông (notch) khoét hình chữ nhật dx × dy,
 // cắt chéo (chamfer) vát theo đường chéo. Phòng khi đó là đa giác; diện tích, chu vi tính theo đa giác.
+// Mỗi phòng có danh sách đồ chủ nhà muốn làm (giường, tủ...) để nhà thầu báo giá theo món.
 
 import { ApiError } from './http.ts';
 
@@ -27,6 +28,12 @@ export interface Opening {
   sill: number;
 }
 
+export interface Item {
+  name: string;
+  qty: number;
+  note: string | null;
+}
+
 export interface Room {
   id: string;
   name: string;
@@ -38,6 +45,7 @@ export interface Room {
   h: number;
   openings: Opening[];
   cuts: CornerCut[];
+  items: Item[];
 }
 
 export interface MeasurementData {
@@ -89,8 +97,18 @@ export function parseMeasurement(raw: unknown): MeasurementData {
       // Hai góc cùng một cạnh không được chồng lên nhau (chừa ít nhất 10 cm tường).
       if (cut.nw.dx + cut.ne.dx > w - 0.1 || cut.sw.dx + cut.se.dx > w - 0.1 ||
           cut.nw.dy + cut.sw.dy > l - 0.1 || cut.ne.dy + cut.se.dy > l - 0.1) throw new ApiError(400, 'invalid_cut_size');
+      const itemsRaw = o.items ?? [];
+      if (!Array.isArray(itemsRaw) || itemsRaw.length > 30) throw new ApiError(400, 'invalid_items');
+      const items: Item[] = itemsRaw.map((it) => {
+        const q = (it ?? {}) as Record<string, unknown>;
+        const itemName = typeof q.name === 'string' ? q.name.trim().slice(0, 50) : '';
+        if (!itemName) throw new ApiError(400, 'missing_item_name');
+        if (!Number.isInteger(q.qty) || (q.qty as number) < 1 || (q.qty as number) > 20) throw new ApiError(400, 'invalid_item_qty');
+        const note = typeof q.note === 'string' && q.note.trim() ? q.note.trim().slice(0, 100) : null;
+        return { name: itemName, qty: q.qty as number, note };
+      });
       return {
-        id, name, type, w, l, h, cuts,
+        id, name, type, w, l, h, cuts, items,
         x: num(o.x, 'room_x', -100, 100),
         y: num(o.y, 'room_y', -100, 100),
         openings: openings.map((p) => {

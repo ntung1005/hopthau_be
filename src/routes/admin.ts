@@ -3,6 +3,7 @@
 
 import { Router, type RequestHandler } from 'express';
 import { ApiError, dbError, must, optStr, optUuid, readJson, str } from '../http.ts';
+import { optProvince } from '../options.ts';
 import { packagePrice, type PriceItem } from '../pricing.ts';
 import type { Supabase } from '../supabase.ts';
 
@@ -74,7 +75,8 @@ export function adminRoutes(supa: Supabase) {
 
   router.get('/contractors', async (req, res) => {
     let q = db.from('contractors')
-      .select('id,name,tax_code,address,areas,styles,bio,status,rating,review_count,created_at,owner:profiles(full_name,phone),packages(count)')
+      .select('id,name,tax_code,address,areas,styles,services,years_experience,website,bio,status,rating,review_count,created_at,' +
+        'contact_name,contact_phone,source,owner:profiles(full_name,phone),packages(count)')
       .order('created_at', { ascending: false });
     if (typeof req.query.status === 'string') q = q.eq('status', req.query.status);
     res.json(must(await q));
@@ -111,7 +113,7 @@ export function adminRoutes(supa: Supabase) {
 
   // Yêu cầu báo giá: xem, ghép thêm nhà thầu -------------------------------------
 
-  const REQUEST = 'id,address,budget,style,note,status,created_at,owner:profiles(full_name,phone),' +
+  const REQUEST = 'id,province,services,address,budget,style,note,status,created_at,owner:profiles(full_name,phone),' +
     'unit_type:unit_types(name,project:projects(name,province)),package:packages(name),' +
     'matches:quote_matches(status,price,created_at,contractor:contractors(id,name))';
 
@@ -121,18 +123,25 @@ export function adminRoutes(supa: Supabase) {
     res.json(must(await q));
   });
 
-  /** Nhà thầu đã xác minh chưa được ghép, khu vực khớp địa chỉ / tỉnh của dự án lên đầu. */
+  /** Nhà thầu đã xác minh, có tài khoản, chưa được ghép; khớp tỉnh (hoặc địa chỉ) và hạng mục lên đầu. */
   router.get('/requests/:id/suggestions', async (req, res) => {
     const r = must(await db.from('quote_requests').select(REQUEST).eq('id', req.params.id).maybeSingle(), 'request_not_found') as unknown as {
-      address: string | null; unit_type: { project: { province: string } } | null; matches: { contractor: { id: string } }[];
+      province: string | null; services: string[]; address: string | null; unit_type: { project: { province: string } } | null;
+      matches: { contractor: { id: string } }[];
     };
-    const place = `${r.address ?? ''} ${r.unit_type?.project.province ?? ''}`.toLowerCase();
+    const place = `${r.province ?? ''} ${r.address ?? ''} ${r.unit_type?.project.province ?? ''}`.toLowerCase();
     const taken = new Set(r.matches.map((m) => m.contractor.id));
-    const all = must(await db.from('contractors').select('id,name,areas,styles,rating,review_count').eq('status', 'verified')) as
-      { id: string; areas: string[]; rating: number | null; review_count: number }[];
+    const all = must(await db.from('contractors').select('id,name,areas,styles,services,rating,review_count')
+      .eq('status', 'verified').not('owner_id', 'is', null)) as
+      { id: string; areas: string[]; services: string[]; rating: number | null; review_count: number }[];
     const ranked = all.filter((c) => !taken.has(c.id))
-      .map((c) => ({ ...c, area_match: c.areas.some((a) => a.length >= 2 && place.includes(a.toLowerCase())) }))
-      .sort((a, b) => Number(b.area_match) - Number(a.area_match) || (b.rating ?? 0) - (a.rating ?? 0));
+      .map((c) => ({
+        ...c,
+        area_match: c.areas.some((a) => a.length >= 2 && place.includes(a.toLowerCase())),
+        service_match: c.services.some((x) => r.services.includes(x)),
+      }))
+      .sort((a, b) => Number(b.area_match) - Number(a.area_match) || Number(b.service_match) - Number(a.service_match) ||
+        (b.rating ?? 0) - (a.rating ?? 0));
     res.json({ remaining: MAX_MATCHES - taken.size, contractors: ranked.slice(0, 20) });
   });
 
@@ -143,8 +152,11 @@ export function adminRoutes(supa: Supabase) {
       'request_not_found') as unknown as { status: string; quote_matches: { count: number }[] };
     if (r.status !== 'open') throw new ApiError(409, 'request_closed');
     if ((r.quote_matches[0]?.count ?? 0) >= MAX_MATCHES) throw new ApiError(409, 'too_many_matches');
-    const c = must(await db.from('contractors').select('status').eq('id', contractorId).maybeSingle(), 'contractor_not_found') as { status: string };
+    const c = must(await db.from('contractors').select('status,owner_id').eq('id', contractorId).maybeSingle(), 'contractor_not_found') as
+      { status: string; owner_id: string | null };
     if (c.status !== 'verified') throw new ApiError(400, 'contractor_not_verified');
+    // Hồ sơ thu từ form web, nhà thầu chưa cài app: ghép vào thì không ai báo giá.
+    if (!c.owner_id) throw new ApiError(400, 'contractor_no_account');
     const { error } = await db.from('quote_matches').insert({ request_id: req.params.id, contractor_id: contractorId });
     if (error?.code === '23505') throw new ApiError(409, 'already_matched');
     if (error) throw dbError(error);
@@ -176,7 +188,7 @@ export function adminRoutes(supa: Supabase) {
     const { data, error } = await db.from('projects').insert({
       slug, name,
       developer: optStr(body, 'developer', 200),
-      province: str(body, 'province', 100),
+      province: optProvince(body) ?? str(body, 'province'),
       address: optStr(body, 'address', 300),
       handover_date: handover,
       is_social_housing: body.is_social_housing !== false,

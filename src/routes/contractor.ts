@@ -2,24 +2,30 @@
 // Ghi bằng token người dùng: RLS và các hàm SQL tự kiểm tra quyền sở hữu.
 
 import { Router, type Request } from 'express';
-import { ApiError, dbError, int, must, optStr, optUuid, readJson, rpc, str, strList } from '../http.ts';
-import { packagePrice, type PriceItem } from '../pricing.ts';
+import { ApiError, dbError, int, must, optInt, optStr, optUuid, readJson, rpc, str, strList } from '../http.ts';
+import { pickList, PROVINCES, SERVICES } from '../options.ts';
+import { packagePrice, parseQuoteItems, type PriceItem } from '../pricing.ts';
 import type { Supabase } from '../supabase.ts';
 import { photoList } from './uploads.ts';
 
 // tax_code không đọc được bằng quyền người dùng (chỉ admin), nên không có trong danh sách.
-const PROFILE = 'id,name,address,areas,styles,bio,logo_url,status,rating,created_at';
+const PROFILE = 'id,name,address,areas,styles,services,years_experience,website,bio,logo_url,status,rating,created_at';
 const PACKAGE = 'id,name,style,duration_days,warranty_months,images,status,updated_at,' +
   'unit_type:unit_types(id,name,project:projects(id,slug,name)),' +
   'items:package_items(id,room,name,material,size,qty,unit,unit_price,is_optional,sort)';
 
-function readProfile(body: Record<string, unknown>) {
+export function readProfile(body: Record<string, unknown>) {
+  const years = optInt(body, 'years_experience');
+  if (years !== null && years > 80) throw new ApiError(400, 'invalid_years_experience');
   return {
     name: str(body, 'name', 100),
     tax_code: optStr(body, 'tax_code', 20),
     address: optStr(body, 'address', 300),
-    areas: strList(body, 'areas'),
+    areas: pickList(body, 'areas', PROVINCES),
     styles: strList(body, 'styles'),
+    services: pickList(body, 'services', SERVICES),
+    years_experience: years,
+    website: optStr(body, 'website', 300),
     bio: optStr(body, 'bio', 2000),
   };
 }
@@ -57,6 +63,10 @@ function readPackage(body: Record<string, unknown>, supabaseUrl: string) {
   };
 }
 
+/** Bỏ trường trống: nhận hồ sơ từ form web thì không xoá thông tin vận hành đã thu. */
+const filled = (o: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && !(Array.isArray(v) && v.length === 0)));
+
 const withPrice = <T extends { items: PriceItem[] }>(p: T) => ({ ...p, price: packagePrice(p.items) });
 
 export function contractorRoutes(supa: Supabase, supabaseUrl: string) {
@@ -71,7 +81,16 @@ export function contractorRoutes(supa: Supabase, supabaseUrl: string) {
   });
 
   router.post('/', async (req, res) => {
-    const { error } = await req.db.from('contractors').insert(readProfile(readJson(req)));
+    const profile = readProfile(readJson(req));
+    // Đã có hồ sơ từ form web với số điện thoại của tài khoản này (chưa ai nhận): nhận hồ sơ đó,
+    // giữ trạng thái xác minh admin đã làm. Trigger on_contractor_owner thêm vai trò contractor.
+    const phone = (must(await supa.admin.from('profiles').select('phone').eq('id', req.userId).single()) as { phone: string }).phone;
+    const { data: claimed, error: claimError } = await supa.admin.from('contractors')
+      .update({ ...filled(profile), owner_id: req.userId }).eq('contact_phone', phone).is('owner_id', null).select('id');
+    if (claimError?.code === '23505') throw new ApiError(409, 'contractor_exists');
+    if (claimError) throw dbError(claimError);
+    if (claimed.length) return res.status(201).json(must(await req.db.from('contractors').select(PROFILE).eq('owner_id', req.userId).single()));
+    const { error } = await req.db.from('contractors').insert(profile);
     if (error?.code === '23505') throw new ApiError(409, 'contractor_exists');
     if (error) throw dbError(error);
     // Đọc lại sau khi ghi: trigger vừa thêm vai trò contractor, RLS đọc thấy hồ sơ pending của mình.
@@ -79,7 +98,9 @@ export function contractorRoutes(supa: Supabase, supabaseUrl: string) {
   });
 
   router.patch('/', async (req, res) => {
-    res.json(must(await req.db.from('contractors').update(readProfile(readJson(req)))
+    // Mã số thuế để trống nghĩa là không đổi (app không đọc lại được MST để điền sẵn).
+    const { tax_code, ...rest } = readProfile(readJson(req));
+    res.json(must(await req.db.from('contractors').update(tax_code ? { ...rest, tax_code } : rest)
       .eq('owner_id', req.userId).select(PROFILE).single(), 'contractor_not_found'));
   });
 
@@ -118,8 +139,8 @@ export function contractorRoutes(supa: Supabase, supabaseUrl: string) {
 
   router.get('/leads', async (req, res) => {
     const rows = must(await req.db.from('quote_matches')
-      .select('status,price,duration_days,message,quoted_at,created_at,' +
-        'request:quote_requests(id,owner_id,address,budget,style,note,status,created_at,job:jobs(id,status),measurement:measurements(id,name),' +
+      .select('status,mode,price,items,duration_days,message,quoted_at,created_at,' +
+        'request:quote_requests(id,owner_id,province,services,address,budget,style,note,status,created_at,job:jobs(id,status),measurement:measurements(id,name),' +
         'unit_type:unit_types(name,area_m2,project:projects(name)),package:packages(id,name))')
       .eq('contractor_id', await myContractorId(req))
       .order('created_at', { ascending: false })) as unknown as Lead[];
@@ -128,11 +149,17 @@ export function contractorRoutes(supa: Supabase, supabaseUrl: string) {
 
   router.post('/leads/:requestId/quote', async (req, res) => {
     const body = readJson(req);
+    const mode = body.mode ?? 'in_app';
+    if (mode !== 'in_app' && mode !== 'offline') throw new ApiError(400, 'invalid_mode');
+    // Báo theo món thì giá là tổng các món; không có món (yêu cầu không kèm bản đo) thì nhập giá trọn gói.
+    const { items, total } = mode === 'in_app' ? parseQuoteItems(body.items) : { items: [], total: 0 };
     await rpc(req, 'submit_quote', {
       p_request: req.params.requestId,
-      p_price: int(body, 'price'),
-      p_duration_days: int(body, 'duration_days'),
+      p_mode: mode,
+      p_price: mode === 'offline' ? null : items.length ? total : int(body, 'price'),
+      p_duration_days: mode === 'offline' ? optInt(body, 'duration_days') : int(body, 'duration_days'),
       p_message: optStr(body, 'message', 2000),
+      p_items: items,
     });
     res.json({ ok: true });
   });

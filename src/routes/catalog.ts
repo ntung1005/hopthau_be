@@ -3,6 +3,7 @@
 
 import { Router } from 'express';
 import { dbError, must } from '../http.ts';
+import { PROVINCES, SERVICES } from '../options.ts';
 import { packagePrice, type PriceItem } from '../pricing.ts';
 import type { Supabase } from '../supabase.ts';
 
@@ -32,6 +33,8 @@ async function minPrices(db: Supabase['anon'], unitTypeIds?: string[]) {
 export function catalogRoutes(supa: Supabase) {
   const db = supa.anon;
   const router = Router();
+
+  router.get('/meta', (_req, res) => res.json({ provinces: PROVINCES, services: SERVICES }));
 
   router.get('/projects', async (req, res) => {
     let q = db.from('projects')
@@ -91,7 +94,7 @@ items:package_items(id,room,name,material,size,qty,unit,unit_price,is_optional,s
   // Hồ sơ nhà thầu công khai: chỉ nhà thầu đã xác minh. Gói đang hiển thị, đánh giá, số công trình đã xong.
   router.get('/contractors/:id', async (req, res) => {
     const c = must(await db.from('contractors')
-      .select('id,name,address,areas,styles,bio,logo_url,status,rating,review_count,created_at')
+      .select('id,name,address,areas,styles,services,years_experience,website,bio,logo_url,status,rating,review_count,created_at')
       .eq('id', req.params.id).eq('status', 'verified').maybeSingle(), 'contractor_not_found') as { id: string; [k: string]: unknown };
     const [packages, reviews, completed] = await Promise.all([
       db.from('packages')

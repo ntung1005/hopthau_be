@@ -60,3 +60,15 @@ test('cắt góc: cửa không nằm trong đoạn tường đã cắt, góc kh�
   assert.doesNotThrow(() => parseMeasurement({ rooms: [{ ...room, cuts: [notch], openings: [{ wall: 'n', kind: 'door', offset: 0.5, width: 0.9, height: 2.1 }] }] }));
 });
 
+
+test('đồ cần làm trong phòng: cắt khoảng trắng, ghi chú trống thành null, kiểm tra số lượng', () => {
+  const d = parseMeasurement({ rooms: [{ ...room, items: [{ name: ' Giường ', qty: 1, note: '1m8 × 2m' }, { name: 'Kệ', qty: 2, note: ' ' }] }] });
+  assert.deepEqual(d.rooms[0].items, [{ name: 'Giường', qty: 1, note: '1m8 × 2m' }, { name: 'Kệ', qty: 2, note: null }]);
+  assert.deepEqual(parseMeasurement({ rooms: [room] }).rooms[0].items, []);
+  for (const [items, code] of [
+    [[{ name: '', qty: 1 }], 'missing_item_name'],
+    [[{ name: 'Tủ', qty: 0 }], 'invalid_item_qty'],
+    [[{ name: 'Tủ', qty: 1.5 }], 'invalid_item_qty'],
+    ['tủ', 'invalid_items'],
+  ] as [unknown, string][]) assert.throws(() => parseMeasurement({ rooms: [{ ...room, items }] }), { code }, code);
+});

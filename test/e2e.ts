@@ -115,16 +115,22 @@ const upd = await ok('PUT', `/measurements/${meas.id}`, owner.token, { name: 'C�
 assert.equal(upd.summary.floor_m2, 20);
 step('bản đo nhà: kiểm tra số đo, tính diện tích, chỉ chủ nhà sửa được');
 
-// Yêu cầu theo địa chỉ: tự ghép nhà thầu đã xác minh cùng khu vực; admin ghép thêm, tối đa 5
-await ok('PATCH', `/contractor`, builder.token, { name: 'Xưởng E2E', areas: ['Bắc Ninh E2E'], styles: ['Hiện đại'] });
-const free = await ok('POST', '/quote-requests', owner.token, { address: 'Từ Sơn, Bắc Ninh E2E', note: 'Nhà phố', measurement_id: meas.id });
+// Yêu cầu theo tỉnh + hạng mục: tự ghép nhà thầu đã xác minh cùng tỉnh; admin ghép thêm, tối đa 5.
+// Cà Mau / Lai Châu: tỉnh dữ liệu demo không có nhà thầu, để kết quả ghép chỉ có nhà thầu của e2e.
+await fails([400, 'invalid_areas'], 'PATCH', `/contractor`, builder.token, { name: 'Xưởng E2E', areas: ['Bắc Ninh E2E'] });
+await ok('PATCH', `/contractor`, builder.token, { name: 'Xưởng E2E', areas: ['Cà Mau'], styles: ['Hiện đại'], services: ['Tủ bếp'] });
+await fails([400, 'missing_province'], 'POST', '/quote-requests', owner.token, { note: 'Thiếu nơi' });
+await fails([400, 'invalid_services'], 'POST', '/quote-requests', owner.token, { province: 'Cà Mau', services: ['Xây nhà'] });
+const free = await ok('POST', '/quote-requests', owner.token,
+  { province: 'Cà Mau', address: 'Nhà phố E2E', services: ['Tủ bếp', 'Sơn bả'], note: 'Nhà phố', measurement_id: meas.id });
+assert.deepEqual(free.services, ['Tủ bếp', 'Sơn bả']);
 assert.equal(free.measurement.id, meas.id);
 const seen = await ok('GET', `/measurements/${meas.id}`, builder.token);
 assert.deepEqual([seen.mine, seen.summary.floor_m2, seen.data.rooms.length], [false, 20, 1]);
 assert.equal((await ok('GET', '/contractor/leads', builder.token)).find((l: Json) => l.request.id === free.id).request.measurement.id, meas.id);
 await fails([404, 'measurement_not_found'], 'GET', `/measurements/${meas.id}`, outsider.token);
 assert.deepEqual(free.quotes.map((q: Json) => q.contractor.id), [profile.id], 'tự ghép theo khu vực');
-const noArea = await ok('POST', '/quote-requests', owner.token, { address: 'Nơi chưa có nhà thầu E2E' });
+const noArea = await ok('POST', '/quote-requests', owner.token, { province: 'Lai Châu' });
 assert.equal(noArea.quotes.length, 0);
 assert.ok((await ok('GET', '/admin/stats', ops.token)).requests_unmatched >= 1);
 const sugg = await ok('GET', `/admin/requests/${noArea.id}/suggestions`, ops.token);
@@ -134,11 +140,44 @@ await ok('POST', `/admin/requests/${noArea.id}/matches`, ops.token, { contractor
 await fails([409, 'already_matched'], 'POST', `/admin/requests/${noArea.id}/matches`, ops.token, { contractor_id: profile.id });
 const outsiderId = (await ok('GET', '/contractor', outsider.token)).id;
 await fails([400, 'contractor_not_verified'], 'POST', `/admin/requests/${noArea.id}/matches`, ops.token, { contractor_id: outsiderId });
+// Hồ sơ từ form web: chưa có tài khoản thì không ghép được; đăng ký app bằng cùng số thì nhận hồ sơ
+const walkIn = await newUser('Thợ từ web E2E');
+await fails([400, 'invalid_areas'], 'POST', '/leads/contractors', undefined, { name: 'x', contact_name: 'y', phone: `0${walkIn.phone.slice(2)}`, areas: ['Sao Hỏa'] });
+await ok('POST', '/leads/contractors', undefined,
+  { name: 'Xưởng web E2E', contact_name: 'Anh Web', phone: `0${walkIn.phone.slice(2)}`, areas: ['Lai Châu'], services: ['Sơn bả'], tax_code: '0100000001' });
+const app = (await ok('GET', '/admin/contractors?status=pending', ops.token)).find((c: Json) => c.contact_phone === walkIn.phone);
+assert.deepEqual([app.owner, app.years_experience, app.services], [null, null, ['Sơn bả']]);
+await ok('PATCH', `/admin/contractors/${app.id}`, ops.token, { status: 'verified' });
+await fails([400, 'contractor_no_account'], 'POST', `/admin/requests/${noArea.id}/matches`, ops.token, { contractor_id: app.id });
+const claimed = await ok('POST', '/contractor', walkIn.token, { name: 'Xưởng web E2E', areas: ['Lai Châu'], years_experience: 3 });
+assert.deepEqual([claimed.id, claimed.status, claimed.years_experience, claimed.services], [app.id, 'verified', 3, ['Sơn bả']]);
+assert.equal((await admin.from('contractors').select('tax_code').eq('id', app.id).single()).data!.tax_code, '0100000001');
+await ok('POST', `/admin/requests/${noArea.id}/matches`, ops.token, { contractor_id: app.id });
+
+// Báo giá theo món: giá = tổng món. Làm việc trực tiếp: không giá; chọn thì công trình chỉ theo dõi mốc, không tiền
+await fails([400, 'invalid_items_0_qty'], 'POST', `/contractor/leads/${noArea.id}/quote`, builder.token,
+  { duration_days: 20, items: [{ name: 'Giường', qty: 0, unit_price: 1 }] });
+await ok('POST', `/contractor/leads/${noArea.id}/quote`, builder.token, { duration_days: 20, price: 1, items: [
+  { room: 'Phòng ngủ', name: 'Giường', qty: 1, unit_price: 6_000_000 }, { name: 'Nhân công', qty: 2, unit_price: 500_000 },
+] });
+await fails([400, 'missing_message'], 'POST', `/contractor/leads/${noArea.id}/quote`, walkIn.token, { mode: 'offline' });
+await ok('POST', `/contractor/leads/${noArea.id}/quote`, walkIn.token, { mode: 'offline', message: 'Qua khảo sát thứ 7' });
+const quotes = (await ok('GET', `/quote-requests/${noArea.id}`, owner.token)).quotes;
+const byC = (id: string) => quotes.find((q: Json) => q.contractor.id === id);
+assert.deepEqual([byC(profile.id).mode, byC(profile.id).price, byC(profile.id).items[1].room], ['in_app', 7_000_000, 'Chung']);
+assert.deepEqual([byC(app.id).mode, byC(app.id).price, byC(app.id).status], ['offline', null, 'quoted']);
+await ok('POST', `/quote-requests/${noArea.id}/accept`, owner.token, { contractor_id: app.id });
+const offJob = await ok('GET', `/jobs/${(await ok('GET', `/quote-requests/${noArea.id}`, owner.token)).job.id}`, walkIn.token);
+assert.deepEqual([offJob.offline, offJob.total, offJob.milestones[0].amount], [true, null, null]);
+await fails([400, 'offline_job'], 'POST', `/jobs/${offJob.id}/changes`, walkIn.token, { title: 'Thêm kệ', amount: 1000 });
+await ok('POST', `/jobs/milestones/${offJob.milestones[0].id}/submit`, walkIn.token, { note: 'Đã chốt thiết kế' });
+await ok('POST', `/jobs/milestones/${offJob.milestones[0].id}/review`, owner.token, { approve: true });
+await fails([404, 'milestone_not_found'], 'POST', `/jobs/milestones/${offJob.milestones[0].id}/paid`, walkIn.token);
 assert.ok((await ok('GET', '/contractor/leads', builder.token)).some((l: Json) => l.request.id === noArea.id));
 const log = await ok('GET', '/admin/audit', ops.token);
-assert.deepEqual(log.slice(0, 3).map((a: Json) => a.action), ['request.match', 'contractor.verified', 'package.published']);
+assert.deepEqual(log.slice(0, 3).map((a: Json) => a.action), ['request.match', 'contractor.verified', 'request.match']);
 await fails([403, 'not_admin'], 'GET', '/admin/audit', owner.token);
-step('yêu cầu theo địa chỉ tự ghép theo khu vực, admin ghép thêm, có audit log');
+step('yêu cầu theo tỉnh + hạng mục tự ghép, hồ sơ nhà thầu từ web được nhận khi đăng ký app, báo giá theo món, làm việc trực tiếp chỉ theo dõi mốc, admin ghép thêm, có audit log');
 
 // Chủ nhà gửi yêu cầu từ gói: tự ghép với nhà thầu
 const request = await ok('POST', '/quote-requests', owner.token, { unit_type_id: UNIT_A, package_id: pkg.id, note: 'E2E' });
@@ -271,6 +310,7 @@ assert.deepEqual([job.status, job.owner.full_name], ['completed', 'Chủ nhà'])
 assert.equal((await ok('GET', `/contractors/${profile.id}`)).review_count, 1);
 await ok('DELETE', '/me', outsider.token);
 await ok('DELETE', '/me', ops.token);
+await ok('DELETE', '/me', walkIn.token);
 // Dọn: nhà thầu test bị ẩn khỏi danh sách công khai và gợi ý ghép (DELETE /me đặt rejected).
 await ok('DELETE', '/me', builder.token);
 step('xoá tài khoản, lịch sử công trình và đánh giá vẫn giữ');

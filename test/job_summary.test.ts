@@ -28,3 +28,10 @@ test('bảo hành tính từ ngày hoàn thành', () => {
   const s = jobSummary({ ...job, completed_at: '2026-03-15T08:00:00.000Z' }, milestones, []);
   assert.equal(s.warranty_until, '2027-03-15T08:00:00.000Z');
 });
+
+test('làm việc trực tiếp: không có số tiền, không có tổng ngày khi chưa hẹn', () => {
+  const s = jobSummary({ ...job, price: null, duration_days: null },
+    milestones.map((m) => ({ ...m, amount: null, paid_at: null })), []);
+  assert.deepEqual([s.offline, s.total, s.total_days, s.approved_amount, s.paid_amount], [true, null, null, null, null]);
+  assert.equal(jobSummary(job, milestones, []).offline, false);
+});
